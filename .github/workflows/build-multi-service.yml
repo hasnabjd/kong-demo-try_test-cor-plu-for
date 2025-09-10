@@ -1,0 +1,291 @@
+name: Build kong-demo-try_test-cor-plu-for - Multi-Service Pipeline
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat/*
+      - main
+      - workflow/**
+    paths-ignore:
+      - 'platform/kong/.generated/kong.yaml'
+
+jobs:
+  has-changes:
+    name: Have specs, configurations, or pipeline files changed
+    runs-on: ubuntu-latest
+    outputs:
+      are-changes: ${{steps.changed-files.outputs.files}}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - uses: dorny/paths-filter@v2
+        id: changed-files
+        with:
+          filters: |
+            files:
+              - '.github/workflows/build-multi-service.yaml'
+              - 'booking-service/openapi.yaml'
+              - 'booking-service/kong/**'
+              - 'notification-service/openapi.yaml'
+              - 'notification-service/kong/**'
+              - 'kong/plugins/**'
+              - 'kong/consumers/**'
+
+  oas-to-kong:
+    name: Convert OAS to Kong configurations
+    needs: has-changes
+    if: ${{needs.has-changes.outputs.are-changes == 'true'}}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Setup deck
+        uses: kong/setup-deck@v1
+        with:
+          deck-version: '1.40.3'
+          wrapper: false
+
+      - name: Create artifacts directory
+        run: |
+          mkdir -p .github/artifacts/kong
+
+      - name: Convert booking-service API to Kong
+        run: |
+          echo "Processing booking-service service..."
+
+          # Generate Kong config from OpenAPI
+          deck file openapi2kong \
+            --spec booking-service/openapi.yaml \
+            --output-file booking-service/kong/.generated/kong.yaml
+          echo "OpenAPI spec converted for booking-service"
+
+          # Check and merge service-specific plugins
+          if ls booking-service/kong/plugins/*.yaml 1> /dev/null 2>&1; then
+            echo "Found plugin files for booking-service"
+            ls booking-service/kong/plugins/*.yaml
+
+            # Check if we have actual plugins or just empty-plugins.yaml
+            if [ -f "booking-service/kong/plugins/empty-plugins.yaml" ] && [ $(ls booking-service/kong/plugins/*.yaml | wc -l) -eq 1 ]; then
+              echo "Found only empty-plugins.yaml for booking-service - service has no specific plugins"
+              echo "ℹSkipping plugin merge for booking-service (no actual plugins to merge)"
+            else
+              # Filter out empty-plugins.yaml and merge only actual plugin files
+              actual_plugins=$(ls booking-service/kong/plugins/*.yaml | grep -v empty-plugins.yaml || echo "")
+              if [ -n "$actual_plugins" ]; then
+                echo "Merging actual plugins for booking-service: $actual_plugins"
+                deck file merge booking-service/kong/.generated/kong.yaml \
+                  $actual_plugins \
+                  --output-file booking-service/kong/.generated/kong.yaml
+                echo "Service-specific plugins merged for booking-service"
+              else
+                echo "No actual plugins to merge for booking-service (only empty-plugins.yaml found)"
+              fi
+            fi
+          else
+            echo "No plugin files found for booking-service"
+          fi
+
+          # Apply service-specific patches if they exist
+          if [ -f "booking-service/kong/patches.yaml" ]; then
+            echo "🔧 Applying patches for booking-service"
+            cat booking-service/kong/.generated/kong.yaml | \
+            deck file patch booking-service/kong/patches.yaml \
+            --output-file booking-service/kong/.generated/kong.yaml
+            echo "Patches applied for booking-service"
+          else
+            echo "No patches found for booking-service"
+          fi
+
+          # Add service-specific tags
+          cat booking-service/kong/.generated/kong.yaml | \
+          deck file add-tags booking-service \
+            --selector "$.services[*]" \
+            --selector "$.services[*].routes[*]" \
+            --selector "$.plugins[*]" \
+            --output-file .github/artifacts/kong/booking-service-kong.yaml
+
+          echo "Tags added for booking-service"
+          echo "booking-service service processing completed!"
+          echo ""
+
+      - name: Convert notification-service API to Kong
+        run: |
+          echo "Processing notification-service service..."
+
+          # Generate Kong config from OpenAPI
+          deck file openapi2kong \
+            --spec notification-service/openapi.yaml \
+            --output-file notification-service/kong/.generated/kong.yaml
+          echo "OpenAPI spec converted for notification-service"
+
+          # Check and merge service-specific plugins
+          if ls notification-service/kong/plugins/*.yaml 1> /dev/null 2>&1; then
+            echo "Found plugin files for notification-service"
+            ls notification-service/kong/plugins/*.yaml
+
+            # Check if we have actual plugins or just empty-plugins.yaml
+            if [ -f "notification-service/kong/plugins/empty-plugins.yaml" ] && [ $(ls notification-service/kong/plugins/*.yaml | wc -l) -eq 1 ]; then
+              echo "Found only empty-plugins.yaml for notification-service - service has no specific plugins"
+              echo "ℹSkipping plugin merge for notification-service (no actual plugins to merge)"
+            else
+              # Filter out empty-plugins.yaml and merge only actual plugin files
+              actual_plugins=$(ls notification-service/kong/plugins/*.yaml | grep -v empty-plugins.yaml || echo "")
+              if [ -n "$actual_plugins" ]; then
+                echo "Merging actual plugins for notification-service: $actual_plugins"
+                deck file merge notification-service/kong/.generated/kong.yaml \
+                  $actual_plugins \
+                  --output-file notification-service/kong/.generated/kong.yaml
+                echo "Service-specific plugins merged for notification-service"
+              else
+                echo "No actual plugins to merge for notification-service (only empty-plugins.yaml found)"
+              fi
+            fi
+          else
+            echo "No plugin files found for notification-service"
+          fi
+
+          # Apply service-specific patches if they exist
+          if [ -f "notification-service/kong/patches.yaml" ]; then
+            echo "🔧 Applying patches for notification-service"
+            cat notification-service/kong/.generated/kong.yaml | \
+            deck file patch notification-service/kong/patches.yaml \
+            --output-file notification-service/kong/.generated/kong.yaml
+            echo "Patches applied for notification-service"
+          else
+            echo "No patches found for notification-service"
+          fi
+
+          # Add service-specific tags
+          cat notification-service/kong/.generated/kong.yaml | \
+          deck file add-tags notification-service \
+            --selector "$.services[*]" \
+            --selector "$.services[*].routes[*]" \
+            --selector "$.plugins[*]" \
+            --output-file .github/artifacts/kong/notification-service-kong.yaml
+
+          echo "Tags added for notification-service"
+          echo "notification-service service processing completed!"
+          echo ""
+
+      - name: Combine Kong Configurations
+        run: |
+          echo "Combining all service configurations..."
+          echo "Service artifacts to combine:"
+          ls -la .github/artifacts/kong/*-kong.yaml
+
+          # Merge all service configurations directly into final kong.yaml
+          deck file merge \
+            .github/artifacts/kong/*-kong.yaml \
+            --output-file .github/artifacts/kong/kong.yaml
+
+          echo "All service configurations combined into kong.yaml"
+          echo "Combined configuration preview:"
+          echo "Services found:"
+          grep -c "name:" .github/artifacts/kong/kong.yaml || echo "0"
+          echo ""
+
+      - name: Add Global Plugins and Consumers
+        run: |
+          echo "Adding global plugins and consumers..."
+
+          echo "Starting with combined service configurations from kong.yaml"
+
+          # Add global plugins if they exist
+          if ls kong/plugins/*.yaml 1> /dev/null 2>&1; then
+            echo "Found global plugins:"
+            ls kong/plugins/*.yaml
+            deck file merge .github/artifacts/kong/kong.yaml \
+              kong/plugins/*.yaml \
+              --output-file .github/artifacts/kong/kong.yaml
+            echo "Global plugins merged successfully"
+          else
+            echo "No global plugins found - continuing without global plugins"
+          fi
+
+          # Add global consumers if they exist
+          if ls kong/consumers/*.yaml 1> /dev/null 2>&1; then
+            echo "Found global consumers:"
+            ls kong/consumers/*.yaml
+            deck file merge .github/artifacts/kong/kong.yaml \
+              kong/consumers/*.yaml \
+              --output-file .github/artifacts/kong/kong.yaml
+            echo "Global consumers merged successfully"
+          else
+            echo "No global consumers found - continuing without global consumers"
+          fi
+
+          echo "Global configuration merging completed!"
+          echo ""
+
+      - name: Apply Global Patches and Tagging
+        run: |
+          # Apply global patches if they exist
+          if [ -f "kong/patches.yaml" ]; then
+            cat .github/artifacts/kong/kong.yaml | \
+            deck file patch kong/patches.yaml \
+            --output-file .github/artifacts/kong/kong.yaml
+          else
+            echo "No patches.yaml found, skipping patch step"
+          fi
+
+          # Create platform directory if it doesn't exist
+          mkdir -p platform/kong/.generated
+
+          # Add demo-wide tags
+          cat .github/artifacts/kong/kong.yaml | \
+          deck file add-tags try_test-cor-plu-for \
+            --selector "$.services[*]" \
+            --selector "$.services[*].routes[*]" \
+            --selector "$.plugins[*]" \
+            --selector "$.consumers[*]" \
+            --output-file platform/kong/.generated/kong.yaml
+
+      - name: Validate Kong config
+        run: |
+          deck file validate platform/kong/.generated/kong.yaml
+          echo "Validation passed"
+
+      - name: Copy artifact
+        run: |
+          mkdir -p .github/artifacts/try_test-cor-plu-for/
+          cp platform/kong/.generated/kong.yaml \
+            .github/artifacts/try_test-cor-plu-for/try_test-cor-plu-for-kong.yaml
+          echo "Artifact copied"
+
+      - name: Deck diff for Konnect
+        id: deck-diff
+        run: |
+          deck gateway diff \
+            --select-tag try_test-cor-plu-for \
+            --konnect-control-plane-name ${{vars.KONNECT_INTERNAL_CP}} \
+            --konnect-token ${{secrets.KONNECT_PAT}} \
+            --konnect-addr ${{vars.KONNECT_ADDR}} \
+            .github/artifacts/try_test-cor-plu-for/try_test-cor-plu-for-kong.yaml || true
+          echo "Deck diff generated"
+
+      - name: Clean up intermediate files
+        run: |
+          # Remove ALL service directories and intermediate files
+          rm -rf */kong/
+
+          # Remove intermediate artifact files but keep demo artifacts
+          find .github/artifacts/kong/ -name "*-kong.yaml" -delete 2>/dev/null || true
+          rm -f .github/artifacts/kong/kong.yaml 2>/dev/null || true
+
+          echo "Intermediate files cleaned up"
+          echo "Files remaining:"
+          find . -name "*.yaml" -type f | grep -E "(kong|service)" || echo "No kong/service files found"
+
+      #an artifact file will be committed only if it the Kong config differs from the previous one.
+      - name: Check status of any files to be committed
+        run: git status
+
+      - name: Create PR to stage changes for the Kong Gateway in production
+        uses: peter-evans/create-pull-request@v5
+        with:
+          title: "❗PRD❗: Staged changes for Kong Gateway PRD deployment - demo_try_test-cor-plu-for multi-service"
+          labels: "PRD,try_test-cor-plu-for"
+          body: "Staged changes for deploying demo_try_test-cor-plu-for multi-service to PRD. Review the deck diff in the workflow logs."
