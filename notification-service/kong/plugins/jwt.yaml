@@ -1,0 +1,6 @@
+plugins:
+- name: jwt
+  service: notification-service
+  config:
+    key_claim_name: iss
+    secret_is_base64: false
